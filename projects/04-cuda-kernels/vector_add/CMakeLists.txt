@@ -13,5 +13,3 @@ target_compile_options(vector_add PRIVATE
 
 add_executable(vector_add_test vector_add_test.cu)
 target_link_libraries(vector_add_test PRIVATE vector_add)
-
-add_executable(vector_add_benchmark benchmark.cu)
