@@ -2,106 +2,240 @@
 
 ## Scope
 
-Build a controlled decoder-only Transformer inference runtime and study the systems behavior behind autoregressive language-model inference.
+Build a realistic CPU reference inference runtime that exposes the systems problems behind production LLM serving before moving the same concepts onto optimized GPU kernels.
 
-The implementation is structured like a small inference runtime: configuration, weights, tokenizer interface, execution state, KV cache, sampling, batching, memory accounting, profiling, and reference validation are separate components.
+The project now covers model execution, request lifecycle, KV-cache memory, paged allocation, continuous batching, chunked prefill budgeting, sampling, cancellation, admission control, metrics, and a serving boundary.
 
-The runtime uses a deterministic tiny Transformer checkpoint generated locally. This keeps tests reproducible and avoids depending on a remote model artifact.
+The implementation uses a deterministic tiny decoder-only Transformer checkpoint generated locally. This keeps tests reproducible and makes the systems behavior inspectable without depending on a remote model artifact.
 
 ## Architecture
 
 ```text
-Request
+Client
   |
   v
-Token IDs
+HTTP boundary
   |
   v
-Request state
+Admission control
   |
-  +---- prefill ----> Transformer ----> logits
-  |                       |               |
-  |                       +--> KV cache   v
-  |                                   sampler
-  |                                       |
-  +---- decode <------------------------ next token
+  v
+Request queue
+  |
+  v
+Continuous scheduler
+  |                  \
+  |                   +--> cancellation
+  v
+Prefill / Decode work
+  |
+  +------> Model executor
+  |             |
+  |             +--> attention
+  |             +--> weights
+  |             +--> sampler
+  |             +--> KV manager
+  |                       |
+  |                       +--> physical blocks
+  |
+  v
+Streaming / completed result
+  |
+  v
+Metrics
 ```
 
-Each block performs:
+## Core execution model
+
+Each Transformer block follows:
 
 ```text
 x = x + Attention(RMSNorm(x), KV-cache)
 x = x + MLP(RMSNorm(x))
 ```
 
-## Prefill versus decode
+The runtime separates prompt processing from token-by-token decoding.
 
-Prefill processes the prompt in parallel and populates the cache. Decode consumes one new token per step and reuses the keys and values from previous steps.
+### Prefill
 
-The runtime measures both phases independently because they expose different bottlenecks. Prefill offers substantial parallel work. Decode performs relatively little new arithmetic per request while repeatedly reading model weights and the growing KV cache.
+Processes prompt tokens and populates the KV cache.
 
-## KV cache
+### Decode
 
-For each layer and request, keys and values are stored as:
+Processes new tokens while reusing previous K/V states.
+
+## KV-cache engineering
+
+`runtime.py` contains the straightforward contiguous cache used by the numerical model.
+
+`paged_kv.py` contains a separate reference allocator representing production-style paged KV management. Requests receive logical block tables backed by a shared physical block pool.
+
+The paged cache supports:
+
+- variable-length requests
+- block allocation
+- block release
+- capacity growth
+- logical-to-physical mapping
+- K/V writes
+- K/V reads
+- memory accounting
+- allocator snapshots
+
+This makes fragmentation and memory pressure explicit instead of hiding them inside a tensor allocation.
+
+## Continuous batching
+
+`scheduler.py` implements a reference continuous-batching scheduler.
+
+Requests move through:
 
 ```text
-K: [kv_heads, sequence, head_dim]
-V: [kv_heads, sequence, head_dim]
+QUEUED -> PREFILL -> DECODING -> FINISHED
+                         |           \
+                         +---------> CANCELLED
+                         +---------> FAILED
 ```
 
-The cache tracks capacity, current length, dtype, and byte usage. Overflow is rejected explicitly.
+The scheduler provides:
+
+- request priorities
+- admission limits
+- token budgets
+- decode reservation
+- prefill scheduling
+- request cancellation
+- EOS handling
+- maximum generation limits
+- request snapshots
+
+The scheduler is intentionally independent of the numerical model. This mirrors production separation between scheduling and execution.
+
+## Serving boundary
+
+`serving.py` provides a small HTTP boundary with:
+
+```text
+POST /v1/generate
+DELETE /v1/requests/{request_id}
+```
+
+It accepts token IDs rather than raw text so tokenization remains a separate concern.
+
+The service submits requests to the scheduler and does not own model execution state.
 
 ## Sampling
 
-Supported policies:
+The existing sampling subsystem supports:
 
-- greedy
+- greedy decoding
 - temperature
 - top-k
 - top-p
-- seeded stochastic sampling
+- deterministic seeded sampling
 
-Sampling is isolated from model execution so generation policy does not affect the numerical core.
-
-## Batching
-
-The batch runner executes independent request states together. Request state remains isolated, which provides a baseline for later continuous batching and scheduler work in Project 07.
+Sampling parameters remain outside the numerical Transformer implementation.
 
 ## Memory accounting
 
-The runtime reports parameter memory, KV-cache memory, activation estimates, and total estimated memory.
+The engine reports parameter memory and KV memory. The paged cache additionally reports:
 
-For a standard cache, the dominant storage scales approximately with:
+- total blocks
+- used blocks
+- free blocks
+- block size
+- per-request block tables
+- physical cache bytes
+
+For a conventional cache:
 
 ```text
 layers × sequence × KV_heads × head_dim × 2 × bytes_per_element
 ```
 
-The factor of two represents K and V.
+The factor two represents K and V.
 
-## Benchmarking
+## Performance model
 
-The benchmark reports prompt length, generated tokens, batch size, prefill latency, decode latency, end-to-end latency, tokens per second, and KV-cache bytes.
+The important inference metrics are:
 
-No benchmark numbers are hard-coded. Hardware measurements must be produced on the machine running the benchmark.
+- queueing delay
+- time to first token
+- inter-token latency
+- end-to-end latency
+- generated tokens per second
+- prompt tokens per second
+- active requests
+- queued requests
+- KV blocks used
 
-## Validation
+Prefill and decode must be measured separately because their computational characteristics differ.
 
-The test suite covers deterministic weights, shape checks, KV-cache correctness, greedy generation, seeded sampling, attention equivalence, cache accounting, and prefill/decode equivalence.
+## Research basis
+
+The design is informed by current inference-system documentation and research:
+
+- Hugging Face KV-cache explanation: https://huggingface.co/docs/transformers/cache_explanation
+- Hugging Face cache strategies: https://huggingface.co/docs/transformers/main/kv_cache
+- Hugging Face continuous batching: https://huggingface.co/docs/transformers/continuous_batching
+- Hugging Face continuous batching architecture: https://huggingface.co/docs/transformers/continuous_batching_architecture
+- vLLM documentation: https://docs.vllm.ai/en/stable/
+- PagedAttention paper: https://arxiv.org/abs/2309.06180
+- FlashAttention paper: https://arxiv.org/abs/2205.14135
+
+The project does not claim to reproduce vLLM's production CUDA implementation. Instead, it implements the underlying systems ideas in a small reference runtime so each optimization is understandable and testable.
 
 ## Real-world extension path
 
-The design prepares for paged KV caching, continuous batching, prefix caching, quantized weights, fused CUDA kernels, tensor parallelism, request cancellation, admission control, token streaming, and an HTTP serving layer.
+The next production-oriented layers are:
 
-## Run
+1. replace NumPy execution with PyTorch or custom C++ operators
+2. replace the reference paged cache with GPU-resident block storage
+3. add fused attention kernels
+4. add prefix-cache block sharing
+5. add chunked prefill to the model executor
+6. add quantized weights and KV cache
+7. add CUDA graph capture
+8. add request streaming
+9. add distributed execution
+10. add admission control based on measured GPU memory
+11. add load testing and SLO dashboards
+
+## Tests
+
+The Day 06 tests cover:
+
+- paged block allocation
+- block reuse after release
+- non-contiguous logical sequences
+- K/V round trips
+- cache exhaustion
+- continuous request admission
+- request replacement after completion
+- cancellation
+- generation limits
+- metrics collection
+- KV memory accounting
+
+Run:
 
 ```bash
 python -m pip install numpy pytest
 pytest -q
-python examples/generate.py
-python benchmarks/benchmark.py
 ```
 
-## Research basis
+Run the numerical generation example:
 
-The project studies the practical consequences of autoregressive decoding, memory bandwidth, cache reuse, batching, and sampling. It also provides the numerical boundary needed before Project 07 investigates PagedAttention-style memory management and continuous batching.
+```bash
+python examples/generate.py
+```
+
+Run the service boundary:
+
+```bash
+python serving.py
+```
+
+## Engineering principle
+
+Correctness and resource accounting come before optimization. A production inference engine is a coordinated system of memory management, scheduling, numerical execution, and observability. Fast kernels without these components do not solve the serving problem.
