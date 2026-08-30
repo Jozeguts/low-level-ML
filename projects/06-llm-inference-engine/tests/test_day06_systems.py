@@ -31,7 +31,6 @@ def test_paged_cache_handles_non_contiguous_logical_sequence():
     keys = np.arange(10, dtype=np.float32).reshape(1, 5, 2)
     values = keys + 100
     cache.write("r", 0, keys, values, start=0)
-    cache.append_tokens("r", 5)
     read_k, read_v = cache.read("r", 0)
     np.testing.assert_array_equal(read_k, keys)
     np.testing.assert_array_equal(read_v, values)
