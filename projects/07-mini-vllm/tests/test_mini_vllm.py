@@ -11,18 +11,22 @@ from scheduler import Request, RequestState, ContinuousBatchScheduler
 
 
 def test_paged_cache_handles_non_contiguous_request_blocks():
-    cache = PagedKVCache(num_blocks=5, block_size=2)
+    cache = PagedKVCache(num_blocks=4, block_size=2)
     cache.allocate("a", 0)
-    cache.append_many("a", [10, 11, 12, 13])
+    cache.append_many("a", [10])
     cache.allocate("b", 0)
-    cache.append_many("b", [20, 21])
-    cache.release("a")
+    cache.append_many("b", [20])
     cache.allocate("c", 0)
-    cache.append_many("c", [30, 31, 32])
+    cache.append_many("c", [30])
+    cache.release("a")
+    cache.release("c")
+    cache.allocate("d", 0)
+    cache.append_many("d", [40, 41, 42])
 
-    assert cache.read("b") == [20, 21]
-    assert cache.read("c") == [30, 31, 32]
-    assert cache.block_table("c") == (0, 1)
+    assert cache.read("b") == [20]
+    assert cache.read("d") == [40, 41, 42]
+    assert len(cache.block_table("d")) == 2
+    assert cache.block_table("d")[0] != cache.block_table("d")[1] - 1
 
 
 def test_cache_rejects_capacity_exhaustion():
