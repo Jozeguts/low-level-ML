@@ -1,8 +1,7 @@
 """Deterministic workload benchmark for Mini vLLM.
 
 This measures scheduler work in logical steps, not GPU throughput. It is
-therefore reproducible on any machine and separates runtime policy from model
-hardware performance.
+reproducible on any machine and separates runtime policy from hardware speed.
 """
 
 from __future__ import annotations
@@ -11,7 +10,7 @@ import argparse
 import json
 import statistics
 import time
-from typing import Dict, List
+from typing import Dict
 
 from engine import EngineConfig, MiniVLLM
 
@@ -24,8 +23,9 @@ WORKLOADS = {
 
 
 def run_case(name: str, config: EngineConfig) -> Dict[str, object]:
+    workload = WORKLOADS[name]
     engine = MiniVLLM(config)
-    for index, (prompt_len, output_len) in enumerate(WORKLOADS[name]):
+    for index, (prompt_len, output_len) in enumerate(workload):
         engine.submit(f"r{index}", range(1, prompt_len + 1), output_len, priority=index % 2)
 
     start = time.perf_counter()
@@ -33,12 +33,13 @@ def run_case(name: str, config: EngineConfig) -> Dict[str, object]:
     wall = time.perf_counter() - start
     steps = engine.scheduler.step_id
     generated = sum(len(r.output) for r in results)
+    prompts = sum(prompt_len for prompt_len, _ in workload)
     ttft = [r.ttft_steps for r in results if r.ttft_steps is not None]
 
     return {
         "workload": name,
         "requests": len(results),
-        "prompt_tokens": sum(len(WORKLOADS[name][i][0] * [0]) for i in []),
+        "prompt_tokens": prompts,
         "generated_tokens": generated,
         "scheduler_steps": steps,
         "logical_tokens_per_step": (generated / steps) if steps else 0.0,
@@ -55,11 +56,7 @@ def main() -> None:
     parser.add_argument("--block-size", type=int, default=8)
     parser.add_argument("--batch-tokens", type=int, default=32)
     args = parser.parse_args()
-    config = EngineConfig(
-        num_blocks=args.blocks,
-        block_size=args.block_size,
-        max_batch_tokens=args.batch_tokens,
-    )
+    config = EngineConfig(num_blocks=args.blocks, block_size=args.block_size, max_batch_tokens=args.batch_tokens)
     print(json.dumps(run_case(args.workload, config), indent=2))
 
 
