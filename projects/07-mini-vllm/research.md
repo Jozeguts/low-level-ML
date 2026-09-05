@@ -110,9 +110,9 @@ Correctness is tested at the invariant level:
 
 ## References
 
-1. Kwon et al., "Efficient Memory Management for Large Language Model Serving with PagedAttention", arXiv:2309.06180.
-2. vLLM documentation, current stable documentation, including PagedAttention and continuous batching.
-3. Hugging Face Transformers documentation, Continuous Batching Architecture.
-4. NVIDIA CUDA C Best Practices Guide, memory coalescing, occupancy, and execution configuration.
+1. Kwon et al., "Efficient Memory Management for Large Language Model Serving with PagedAttention", https://arxiv.org/abs/2309.06180
+2. vLLM documentation, https://docs.vllm.ai/en/stable/
+3. Hugging Face Transformers, Continuous Batching Architecture, https://huggingface.co/docs/transformers/continuous_batching_architecture
+4. NVIDIA CUDA C Best Practices Guide, https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/
 
 The repository implementation is a teaching and systems-engineering reference. It is not a reimplementation of the full vLLM codebase.
