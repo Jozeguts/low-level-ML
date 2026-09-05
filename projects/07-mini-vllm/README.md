@@ -10,7 +10,9 @@ The implementation is CPU-only and deterministic. It does not pretend to be a GP
 
 A single LLM forward pass is not the complete serving problem. Real workloads contain requests with different prompt lengths and different generation lengths. KV state grows while requests are active. Short requests finish earlier than long requests.
 
-Static batching waits for a whole batch to finish. Continuous batching changes batch membership as requests finish, keeping available execution capacity useful for other requests. Modern inference systems combine this scheduling model with paged KV memory and token budgets. citeturn1search0turn0search0
+Static batching waits for a whole batch to finish. Continuous batching changes batch membership as requests finish, keeping available execution capacity useful for other requests. Modern inference systems combine this scheduling model with paged KV memory and token budgets.
+
+References: https://docs.vllm.ai/en/stable/ and https://huggingface.co/docs/transformers/continuous_batching_architecture
 
 ## Architecture
 
@@ -48,7 +50,7 @@ WAITING -> PREFILL -> DECODE -> FINISHED
 WAITING -----------------------> REJECTED
 ```
 
-The scheduler uses a request cap and a token budget. Decode work consumes one logical token per active request. Prefill consumes the selected number of prompt tokens. This mirrors the key scheduling controls exposed by modern continuous-batching runtimes. citeturn0search0turn0search4
+The scheduler uses a request cap and a token budget. Decode work consumes one logical token per active request. Prefill consumes the selected number of prompt tokens. This mirrors the key scheduling controls exposed by modern continuous-batching runtimes.
 
 ## Paged KV cache
 
@@ -64,7 +66,9 @@ internal_tail_waste = allocated_tokens - L
 
 A request owns a block table. Physical blocks do not need to be adjacent. This is the core distinction between logical sequence order and physical KV placement.
 
-The original PagedAttention work applies virtual-memory-style paging to KV cache management to reduce fragmentation and improve memory utilization for serving. citeturn1academia12
+The original PagedAttention work applies virtual-memory-style paging to KV cache management to reduce fragmentation and improve memory utilization for serving.
+
+Reference: https://arxiv.org/abs/2309.06180
 
 ## Implemented components
 
@@ -112,6 +116,14 @@ Three deterministic workload classes are included:
 The benchmark reports prompt tokens, generated tokens, scheduler steps, logical tokens per scheduler step, and TTFT statistics.
 
 This is a logical runtime benchmark. It is not GPU throughput data.
+
+### `metrics.py`
+
+Exports request-level and engine-level metrics including prompt tokens, generated tokens, TTFT, scheduler steps, cache utilization, and internal waste.
+
+### `stream.py`
+
+Provides a transport-neutral token event queue. A production server could connect this interface to SSE, WebSocket, or another streaming transport.
 
 ### `tests/test_mini_vllm.py`
 
@@ -164,7 +176,7 @@ A contiguous allocation model wants a large consecutive region. A paged model on
 
 ### Continuous batching
 
-A completed short request can leave the active set while another waiting request enters. The active set therefore changes over time instead of being frozen until the longest request finishes. citeturn0search0turn0search3
+A completed short request can leave the active set while another waiting request enters. The active set therefore changes over time instead of being frozen until the longest request finishes.
 
 ### Memory-aware scheduling
 
@@ -180,7 +192,9 @@ See [`research.md`](./research.md) for the detailed design analysis, equations, 
 
 ## Relationship to real vLLM
 
-This project is inspired by the publicly documented systems ideas in vLLM. Current vLLM documentation lists PagedAttention, continuous batching, chunked prefill, prefix caching, CUDA/HIP graphs, optimized attention kernels, quantization, and distributed execution among its serving capabilities. This project implements only a small educational subset. citeturn1search0
+This project is inspired by publicly documented systems ideas in vLLM. Current vLLM documentation lists PagedAttention, continuous batching, chunked prefill, prefix caching, CUDA/HIP graphs, optimized attention kernels, quantization, and distributed execution among its serving capabilities.
+
+Reference: https://docs.vllm.ai/en/stable/
 
 It is not a copy of the vLLM implementation and should not be described as production-ready inference software.
 
@@ -201,7 +215,9 @@ A realistic next sequence would be:
 11. Add quantized KV storage.
 12. Add distributed execution only after the single-device runtime is correct.
 
-GPU implementation should preserve the same logical invariants. CUDA performance work must then account for coalesced memory access, occupancy, block configuration, register pressure, and measured hardware behavior. citeturn0search2
+GPU implementation should preserve the same logical invariants. CUDA performance work must then account for coalesced memory access, occupancy, block configuration, register pressure, and measured hardware behavior.
+
+Reference: https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/
 
 ## Success criteria
 
