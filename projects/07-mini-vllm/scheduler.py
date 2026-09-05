@@ -48,13 +48,8 @@ class Request:
 class ContinuousBatchScheduler:
     """Token-budgeted scheduler that mixes active decode and waiting prefill."""
 
-    def __init__(
-        self,
-        cache: PagedKVCache,
-        max_requests: int = 8,
-        max_batch_tokens: int = 64,
-        prefill_chunk: int = 16,
-    ) -> None:
+    def __init__(self, cache: PagedKVCache, max_requests: int = 8,
+                 max_batch_tokens: int = 64, prefill_chunk: int = 16) -> None:
         if max_requests <= 0 or max_batch_tokens <= 0 or prefill_chunk <= 0:
             raise ValueError("scheduler limits must be positive")
         self.cache = cache
@@ -78,11 +73,7 @@ class ContinuousBatchScheduler:
 
     def cancel(self, request_id: str, reason: str = "client_cancelled") -> bool:
         request = self.requests.get(request_id)
-        if request is None or request.state in {
-            RequestState.FINISHED,
-            RequestState.CANCELLED,
-            RequestState.REJECTED,
-        }:
+        if request is None or request.state in {RequestState.FINISHED, RequestState.CANCELLED, RequestState.REJECTED}:
             return False
         request.state = RequestState.CANCELLED
         request.cancel_reason = reason
@@ -90,10 +81,7 @@ class ContinuousBatchScheduler:
         return True
 
     def _active(self) -> List[Request]:
-        return [
-            r for r in self.requests.values()
-            if r.state in {RequestState.PREFILL, RequestState.DECODE}
-        ]
+        return [r for r in self.requests.values() if r.state in {RequestState.PREFILL, RequestState.DECODE}]
 
     def _waiting(self) -> List[Request]:
         return [r for r in self.requests.values() if r.state == RequestState.WAITING]
@@ -103,7 +91,8 @@ class ContinuousBatchScheduler:
 
     def _admit(self, request: Request) -> bool:
         try:
-            self.cache.allocate(request.request_id, min(len(request.prompt), self.prefill_chunk))
+            # Allocate the request table first. Physical blocks grow on demand.
+            self.cache.allocate(request.request_id, 0)
         except OutOfKVBlocks:
             request.state = RequestState.REJECTED
             request.cancel_reason = "kv_capacity"
@@ -113,11 +102,11 @@ class ContinuousBatchScheduler:
         return True
 
     def plan(self) -> dict:
-        """Return work for the next step without mutating token contents."""
+        """Return work for the next step without mutating request state."""
         slots = self.max_requests
         budget = self.max_batch_tokens
         decode: List[str] = []
-        prefill: List[str] = []
+        prefill: List[dict] = []
 
         active = self._ordered(self._active())
         for request in active:
@@ -132,17 +121,16 @@ class ContinuousBatchScheduler:
             if slots == 0 or budget == 0:
                 break
             chunk = min(request.remaining_prompt, self.prefill_chunk, budget)
-            if chunk <= 0:
-                continue
-            prefill.append(request.request_id)
-            budget -= chunk
-            slots -= 1
+            if chunk:
+                prefill.append({"request_id": request.request_id, "tokens": chunk})
+                budget -= chunk
+                slots -= 1
 
         for request in active:
             if request.state == RequestState.PREFILL and slots and budget:
                 chunk = min(request.remaining_prompt, self.prefill_chunk, budget)
-                if chunk > 0:
-                    prefill.append(request.request_id)
+                if chunk:
+                    prefill.append({"request_id": request.request_id, "tokens": chunk})
                     budget -= chunk
                     slots -= 1
 
@@ -150,9 +138,8 @@ class ContinuousBatchScheduler:
 
     def start_prefill(self, request_id: str) -> Request:
         request = self.requests[request_id]
-        if request.state != RequestState.WAITING:
-            return request
-        self._admit(request)
+        if request.state == RequestState.WAITING:
+            self._admit(request)
         return request
 
     def apply_prefill(self, request_id: str, token_count: int) -> Request:
@@ -160,8 +147,9 @@ class ContinuousBatchScheduler:
         if request.state != RequestState.PREFILL:
             raise ValueError("request is not in prefill")
         token_count = min(token_count, request.remaining_prompt)
+        start = request.prefill_cursor
+        self.cache.append_many(request_id, request.prompt[start:start + token_count])
         request.prefill_cursor += token_count
-        self.cache.ensure_capacity(request_id, request.prefill_cursor + len(request.generated))
         if request.prefill_cursor == len(request.prompt):
             request.state = RequestState.DECODE
         return request
@@ -189,9 +177,6 @@ class ContinuousBatchScheduler:
     def snapshot(self) -> dict:
         return {
             "step": self.step_id,
-            "states": {
-                state.value: sum(r.state == state for r in self.requests.values())
-                for state in RequestState
-            },
+            "states": {state.value: sum(r.state == state for r in self.requests.values()) for state in RequestState},
             "cache": self.cache.stats().__dict__,
         }
