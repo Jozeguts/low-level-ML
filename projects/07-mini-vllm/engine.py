@@ -1,13 +1,11 @@
 """End-to-end Mini vLLM continuous-batching simulator.
 
-The model is intentionally deterministic. The engineering target is the
-serving runtime: dynamic batch membership, KV block growth, scheduling and
-per-request latency accounting.
+The model is deterministic. The engineering target is the serving runtime:
+dynamic batch membership, KV block growth, scheduling and latency accounting.
 """
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from typing import Dict, Iterable, List
 
@@ -45,7 +43,6 @@ class MiniVLLM:
             prefill_chunk=self.config.prefill_chunk,
         )
         self._completed: Dict[str, RequestResult] = {}
-        self._wall_start: Dict[str, float] = {}
 
     def submit(self, request_id: str, prompt: Iterable[int], max_new_tokens: int, priority: int = 0) -> None:
         request = Request(
@@ -55,7 +52,6 @@ class MiniVLLM:
             priority=priority,
         )
         self.scheduler.submit(request)
-        self._wall_start[request_id] = time.perf_counter()
 
     def _next_token(self, request: Request) -> int:
         """Deterministic stand-in for a model's next-token logits."""
@@ -77,34 +73,23 @@ class MiniVLLM:
         )
 
     def step(self) -> dict:
-        """Execute one scheduler iteration.
-
-        Decode requests consume one token of batch budget each. Waiting and
-        partially prefilling requests consume their prompt-token budget. New
-        requests can join as soon as a decode request finishes.
-        """
+        """Execute one continuous-batching scheduler iteration."""
         plan = self.scheduler.plan()
 
-        for request_id in plan["prefill"]:
+        for item in plan["prefill"]:
+            request_id = item["request_id"]
             request = self.scheduler.requests[request_id]
             if request.state == RequestState.WAITING:
                 self.scheduler.start_prefill(request_id)
             request = self.scheduler.requests[request_id]
-            if request.state != RequestState.PREFILL:
-                continue
-            chunk = min(request.remaining_prompt, self.config.prefill_chunk, plan["unused_token_budget"])
-            if chunk <= 0:
-                continue
-            self.scheduler.apply_prefill(request_id, chunk)
+            if request.state == RequestState.PREFILL:
+                self.scheduler.apply_prefill(request_id, item["tokens"])
 
-        # Decode is intentionally executed after prefill planning. This keeps
-        # existing decode work resident while new prompts enter the system.
         for request_id in plan["decode"]:
             request = self.scheduler.requests[request_id]
             if request.state != RequestState.DECODE:
                 continue
-            token = self._next_token(request)
-            self.scheduler.append_token(request_id, token)
+            self.scheduler.append_token(request_id, self._next_token(request))
             if request.state == RequestState.FINISHED:
                 self._finish(request)
 
@@ -124,10 +109,7 @@ class MiniVLLM:
             ]
             if not unfinished:
                 break
-            before = self.scheduler.step_id
             self.step()
-            if self.scheduler.step_id == before:
-                raise RuntimeError("engine made no progress")
         else:
             raise TimeoutError("engine did not finish within max_steps")
 
